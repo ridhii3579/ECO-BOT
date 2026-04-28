@@ -1,71 +1,58 @@
 import os
-import json
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torchvision import datasets, transforms, models
+from torchvision import models
+import matplotlib.pyplot as plt
+
+from utils.dataloader import get_loaders
+
 
 # ================= CONFIG =================
-DATA_DIR = "data"
-EPOCHS = 15
-LR = 0.0003
+data_dir = r"C:\Users\HP\OneDrive\Desktop\Material\Experimental design project\eco_bot\data"
+epochs = 50
+lr = 0.0005
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ================= TRANSFORMS =================
-train_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(15),
-    transforms.ColorJitter(brightness=0.2),
-    transforms.ToTensor(),
-    transforms.Normalize([0.5]*3, [0.5]*3)
-])
 
-val_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize([0.5]*3, [0.5]*3)
-])
-
-# ================= DATA =================
-train_data = datasets.ImageFolder(os.path.join(DATA_DIR, "train"), transform=train_transform)
-val_data = datasets.ImageFolder(os.path.join(DATA_DIR, "val"), transform=val_transform)
-
-train_loader = torch.utils.data.DataLoader(train_data, batch_size=32, shuffle=True)
-val_loader = torch.utils.data.DataLoader(val_data, batch_size=32)
-
-classes = train_data.classes
+# ================= LOAD DATA =================
+train_loader, val_loader, test_loader, classes = get_loaders(data_dir)
 print("Classes:", classes)
 
-# save class order
-os.makedirs("models", exist_ok=True)
-with open("models/classes.json", "w") as f:
-    json.dump(classes, f)
 
 # ================= MODEL =================
-model = models.mobilenet_v2(weights="DEFAULT")
+model = models.mobilenet_v2(pretrained=True)
 
-# 🔥 DO NOT freeze everything
+# Freeze feature layers
 for param in model.features.parameters():
-    param.requires_grad = True
+    param.requires_grad = False
 
+# Replace classifier
 model.classifier[1] = nn.Linear(model.last_channel, len(classes))
-model = model.to(DEVICE)
+model = model.to(device)
 
-# ================= LOSS =================
+
+# ================= LOSS & OPTIMIZER =================
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=LR)
+optimizer = optim.Adam(model.parameters(), lr=lr)
 
-# ================= TRAIN =================
-best_acc = 0
 
-for epoch in range(EPOCHS):
+# ================= METRIC STORAGE =================
+train_losses = []
+train_accuracies = []
+val_accuracies = []
+
+
+# ================= TRAIN FUNCTION =================
+def train_one_epoch():
     model.train()
-    correct, total, loss_sum = 0, 0, 0
+    total_loss = 0
+    correct = 0
+    total = 0
 
     for images, labels in train_loader:
-        images, labels = images.to(DEVICE), labels.to(DEVICE)
+        images, labels = images.to(device), labels.to(device)
 
         optimizer.zero_grad()
         outputs = model(images)
@@ -73,20 +60,25 @@ for epoch in range(EPOCHS):
         loss.backward()
         optimizer.step()
 
-        loss_sum += loss.item()
+        total_loss += loss.item()
+
         _, preds = torch.max(outputs, 1)
         correct += (preds == labels).sum().item()
         total += labels.size(0)
 
-    train_acc = 100 * correct / total
+    acc = 100 * correct / total
+    return total_loss / len(train_loader), acc
 
-    # ===== VALIDATION =====
+
+# ================= VALIDATION =================
+def validate():
     model.eval()
-    correct, total = 0, 0
+    correct = 0
+    total = 0
 
     with torch.no_grad():
         for images, labels in val_loader:
-            images, labels = images.to(DEVICE), labels.to(DEVICE)
+            images, labels = images.to(device), labels.to(device)
 
             outputs = model(images)
             _, preds = torch.max(outputs, 1)
@@ -94,16 +86,57 @@ for epoch in range(EPOCHS):
             correct += (preds == labels).sum().item()
             total += labels.size(0)
 
-    val_acc = 100 * correct / total
+    acc = 100 * correct / total
+    return acc
 
-    print(f"\nEpoch {epoch+1}")
-    print(f"Train Acc: {train_acc:.2f}%")
-    print(f"Val Acc  : {val_acc:.2f}%")
 
-    # SAVE BEST MODEL
+# ================= TRAIN LOOP =================
+best_acc = 0
+
+for epoch in range(epochs):
+    train_loss, train_acc = train_one_epoch()
+    val_acc = validate()
+
+    # Store metrics
+    train_losses.append(train_loss)
+    train_accuracies.append(train_acc)
+    val_accuracies.append(val_acc)
+
+    print(f"\nEpoch {epoch+1}/{epochs}")
+    print(f"Train Loss: {train_loss:.4f}")
+    print(f"Train Acc : {train_acc:.2f}%")
+    print(f"Val Acc   : {val_acc:.2f}%")
+
+    # Save best model
     if val_acc > best_acc:
         best_acc = val_acc
         torch.save(model.state_dict(), "models/best_model.pth")
-        print("✅ Model Saved!")
+        print("✅ Model saved!")
+
 
 print("\n🎯 Training Complete")
+
+
+# ================= GRAPH PLOTTING =================
+
+# Loss Graph
+plt.figure()
+plt.plot(train_losses)
+plt.title("Training Loss")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.grid()
+plt.savefig("loss.png")
+
+# Accuracy Graph
+plt.figure()
+plt.plot(train_accuracies, label="Train Accuracy")
+plt.plot(val_accuracies, label="Validation Accuracy")
+plt.title("Accuracy vs Epoch")
+plt.xlabel("Epoch")
+plt.ylabel("Accuracy (%)")
+plt.legend()
+plt.grid()
+plt.savefig("accuracy.png")
+
+print("📊 Graphs saved as loss.png and accuracy.png")
